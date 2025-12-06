@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings" // NEW: Needed to split the commas
 	"sync"
 	"time"
 )
 
-// Global variable to store the size of the "fake" 404 page
 var soft404Size int64 = -1
 
 func main() {
@@ -19,27 +19,39 @@ func main() {
 	targetURL := flag.String("u", "", "Target URL")
 	wordlistPtr := flag.String("w", "wordlist.txt", "Path to wordlist")
 	threads := flag.Int("t", 20, "Number of concurrent threads")
+	extPtr := flag.String("x", "", "Extensions to check (comma separated, e.g., php,html)") // NEW FLAG
 	flag.Parse()
 
 	if *targetURL == "" {
-		fmt.Println("Usage: knock -u <url> -w <wordlist> -t <threads>")
+		fmt.Println("Usage: knock -u <url> -w <wordlist> -t <threads> -x <extensions>")
 		os.Exit(1)
 	}
 
-	// 2. Setup Client
+	// 2. Process Extensions
+	// If user types "php,html", we create a list: ["", ".php", ".html"]
+	// We add "" (empty string) so we always check the original word too!
+	extensions := []string{""}
+	if *extPtr != "" {
+		// Split "php,html" into ["php", "html"]
+		extList := strings.Split(*extPtr, ",")
+		for _, ext := range extList {
+			// Add the dot, e.g., ".php"
+			extensions = append(extensions, "."+ext)
+		}
+	}
+
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	// 3. CALIBRATION PHASE
-	fmt.Printf("[*] Calibrating Soft 404 detection on %s...\n", *targetURL)
+	// 3. CALIBRATION
+	fmt.Printf("[*] Calibrating Soft 404 on %s...\n", *targetURL)
 	calibrate(client, *targetURL)
 
-	fmt.Printf("[*] Knocking with %d threads...\n", *threads)
+	fmt.Printf("[*] Knocking with %d threads (checking %d variations per word)...\n", *threads, len(extensions))
 
-	// 4. Setup Conveyor Belt
 	jobs := make(chan string)
 	var wg sync.WaitGroup
 
-	// 5. Spawn Workers
+	// 4. Workers
 	for i := 0; i < *threads; i++ {
 		wg.Add(1)
 		go func() {
@@ -50,26 +62,22 @@ func main() {
 					continue
 				}
 				
-				// READ the body to get the true length 
-				// (ContentLength header isn't always accurate, so we discard body but count bytes)
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				length := int64(len(bodyBytes))
 				resp.Body.Close()
 
-				// THE SMART CHECK
 				if resp.StatusCode == 200 {
-					// If the page size matches the "Not Found" page size, ignore it!
 					if length == soft404Size {
 						continue 
 					}
-					
+					// Found!
 					fmt.Printf("[+] FOUND: %s (Status: 200, Size: %d)\n", url, length)
 				}
 			}
 		}()
 	}
 
-	// 6. Feed the Conveyor Belt
+	// 5. Feed the Belt
 	file, err := os.Open(*wordlistPtr)
 	if err != nil {
 		fmt.Println(err)
@@ -79,8 +87,12 @@ func main() {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		word := scanner.Text()
-		fullURL := fmt.Sprintf("%s/%s", *targetURL, word)
-		jobs <- fullURL 
+		
+		// NEW LOOP: For every word, generate all extension variations
+		for _, ext := range extensions {
+			fullURL := fmt.Sprintf("%s/%s%s", *targetURL, word, ext)
+			jobs <- fullURL
+		}
 	}
 	file.Close()
 
@@ -88,9 +100,7 @@ func main() {
 	wg.Wait()
 }
 
-// calibrate sends a request to a nonsense URL to see what a 404 looks like
 func calibrate(client *http.Client, baseURL string) {
-	// Request a random junk URL
 	junkURL := baseURL + "/" + "thisshouldnotexist_random_12345"
 	resp, err := client.Get(junkURL)
 	if err != nil {
@@ -99,9 +109,6 @@ func calibrate(client *http.Client, baseURL string) {
 	}
 	defer resp.Body.Close()
 
-	// Measure the length of the error page
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	soft404Size = int64(len(bodyBytes))
-
-	fmt.Printf("[*] Calibration complete. Soft 404 pages are approx %d bytes.\n", soft404Size)
 }

@@ -3,7 +3,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 class BadServer(BaseHTTPRequestHandler):
     def do_GET(self):
         # If the file is "admin" or "secret", give real content
-        if self.path == "/admin":
+        if self.path == "/admin" or self.path == "/admin.php":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"This is the REAL admin page!")
